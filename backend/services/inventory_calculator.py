@@ -104,6 +104,16 @@ class InventoryCalculator:
             raise Exception(f"Failed to download {file_path}: {response.status_code}")
         return response.content
     
+    def _parse_excel_file(self, file_data, file_name, sheet_name=None):
+        """Parse a single Excel file from binary data"""
+        try:
+            if sheet_name:
+                return pd.read_excel(BytesIO(file_data), sheet_name=sheet_name)
+            else:
+                return pd.read_excel(BytesIO(file_data))
+        except Exception as e:
+            raise Exception(f"Failed to parse {file_name}: {str(e)}")
+    
     def download_sharepoint_data(self):
         """Download all required Excel files from SharePoint in parallel"""
         method_start = time.time()
@@ -157,13 +167,38 @@ class InventoryCalculator:
         
         print(f"[PERF]   - Parallel downloads: {time.time() - download_start:.2f}s")
         
-        # Parse all Excel files from downloaded data
+        # Parse all Excel files from downloaded data in parallel
         parse_start = time.time()
-        df_sales_order_check_list = pd.read_excel(BytesIO(downloaded_data['sales_checklist']))
-        df_inventory = pd.read_excel(BytesIO(downloaded_data['inventory']))
-        df_order = pd.read_excel(BytesIO(downloaded_data['order']))
-        df_order_tracking = pd.read_excel(BytesIO(downloaded_data['ls_tracking']), sheet_name='Shipped')
-        print(f"[PERF]   - Parse Excel files: {time.time() - parse_start:.2f}s")
+        
+        # Create parsing tasks
+        parse_tasks = [
+            ('sales_checklist', downloaded_data['sales_checklist'], None),
+            ('inventory', downloaded_data['inventory'], None),
+            ('order', downloaded_data['order'], None),
+            ('ls_tracking', downloaded_data['ls_tracking'], 'Shipped')
+        ]
+        
+        # Parse all files in parallel
+        parsed_data = {}
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(self._parse_excel_file, task[1], task[0], task[2]): task[0] 
+                for task in parse_tasks
+            }
+            
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    parsed_data[name] = future.result()
+                except Exception as e:
+                    raise Exception(f"Failed to parse {name}: {str(e)}")
+        
+        df_sales_order_check_list = parsed_data['sales_checklist']
+        df_inventory = parsed_data['inventory']
+        df_order = parsed_data['order']
+        df_order_tracking = parsed_data['ls_tracking']
+        
+        print(f"[PERF]   - Parse Excel files (parallel): {time.time() - parse_start:.2f}s")
         
         print(f"[PERF]   - download_sharepoint_data total: {time.time() - method_start:.2f}s")
         
