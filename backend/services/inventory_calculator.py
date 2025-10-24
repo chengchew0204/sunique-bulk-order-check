@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import requests
 import msal
+import time
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from io import BytesIO
@@ -105,12 +106,15 @@ class InventoryCalculator:
     
     def download_sharepoint_data(self):
         """Download all required Excel files from SharePoint in parallel"""
+        method_start = time.time()
+        
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             'Content-Type': 'application/json'
         }
         
         # Get folder contents to find file IDs
+        folder_scan_start = time.time()
         url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id_documents}/items/{self.folder_id}/children"
         response = requests.get(url, headers=headers)
         
@@ -127,6 +131,8 @@ class InventoryCalculator:
         else:
             raise Exception(f"Failed to get folder contents: {response.status_code} {response.text}")
         
+        print(f"[PERF]   - Folder scan: {time.time() - folder_scan_start:.2f}s")
+        
         # Create download tasks for all 4 files
         download_tasks = [
             ('sales_checklist', sales_order_checklist_id),
@@ -136,6 +142,7 @@ class InventoryCalculator:
         ]
         
         # Download all files in parallel
+        download_start = time.time()
         downloaded_data = {}
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(self._download_file, task[1], headers): task[0] 
@@ -148,11 +155,17 @@ class InventoryCalculator:
                 except Exception as e:
                     raise Exception(f"Failed to download {name}: {str(e)}")
         
+        print(f"[PERF]   - Parallel downloads: {time.time() - download_start:.2f}s")
+        
         # Parse all Excel files from downloaded data
+        parse_start = time.time()
         df_sales_order_check_list = pd.read_excel(BytesIO(downloaded_data['sales_checklist']))
         df_inventory = pd.read_excel(BytesIO(downloaded_data['inventory']))
         df_order = pd.read_excel(BytesIO(downloaded_data['order']))
         df_order_tracking = pd.read_excel(BytesIO(downloaded_data['ls_tracking']), sheet_name='Shipped')
+        print(f"[PERF]   - Parse Excel files: {time.time() - parse_start:.2f}s")
+        
+        print(f"[PERF]   - download_sharepoint_data total: {time.time() - method_start:.2f}s")
         
         return {
             'sales_order_check_list': df_sales_order_check_list,
@@ -257,23 +270,46 @@ class InventoryCalculator:
     
     def generate_results(self, df_bulk_order):
         """Main orchestration function"""
-        # Authenticate and download data
-        self.authenticate_sharepoint()
-        self.get_site_info()
-        self.get_drive_id()
-        self.get_folder_id()
+        start_time = time.time()
+        print(f"[PERF] Starting inventory calculation...")
         
+        # Authenticate and download data
+        auth_start = time.time()
+        self.authenticate_sharepoint()
+        print(f"[PERF] Authentication: {time.time() - auth_start:.2f}s")
+        
+        site_start = time.time()
+        self.get_site_info()
+        print(f"[PERF] Get site info: {time.time() - site_start:.2f}s")
+        
+        drive_start = time.time()
+        self.get_drive_id()
+        print(f"[PERF] Get drive ID: {time.time() - drive_start:.2f}s")
+        
+        folder_start = time.time()
+        self.get_folder_id()
+        print(f"[PERF] Get folder ID: {time.time() - folder_start:.2f}s")
+        
+        download_start = time.time()
         data = self.download_sharepoint_data()
+        print(f"[PERF] Download all files: {time.time() - download_start:.2f}s")
         
         # Process order tracking
+        tracking_start = time.time()
         df_order_tracking = self.process_order_tracking(data['order_tracking'])
+        print(f"[PERF] Process order tracking: {time.time() - tracking_start:.2f}s")
         
         # Calculate sales forecast
+        forecast_start = time.time()
         df_inventory_temp, df_sales_order = self.calculate_sales_forecast(
             data['order'],
             data['sales_order_check_list'],
             data['inventory']
         )
+        print(f"[PERF] Calculate sales forecast: {time.time() - forecast_start:.2f}s")
+        
+        # Extract stock and sales, merge, and calculate results
+        calc_start = time.time()
         
         # Extract stock
         stock = df_inventory_temp.rename(columns={'Product Name': 'SKU', 'rawQuantityAvailable': 'Stock'})
@@ -309,6 +345,9 @@ class InventoryCalculator:
         
         # Select final columns in correct order: SKU, NEED, result, Stock, Sale, Actual Can Sell
         df_final = df_result[['SKU', 'NEED', 'result', 'Stock', 'Sale', 'Actual Can Sell']].copy()
+        
+        print(f"[PERF] Final calculations: {time.time() - calc_start:.2f}s")
+        print(f"[PERF] TOTAL TIME: {time.time() - start_time:.2f}s")
         
         return df_final
     
