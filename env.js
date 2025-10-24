@@ -1,0 +1,4 @@
+window.ENV = {
+  API_BASE_URL: 'REPLACE_WITH_API_URL'
+};
+
