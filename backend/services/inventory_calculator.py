@@ -8,6 +8,7 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.formatting.rule import FormulaRule
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class InventoryCalculator:
@@ -94,8 +95,16 @@ class InventoryCalculator:
         else:
             raise Exception(f"Failed to get folder list: {response.status_code} {response.text}")
     
+    def _download_file(self, file_path, headers):
+        """Download a single file from SharePoint"""
+        download_url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id_documents}/items/{file_path}/content"
+        response = requests.get(download_url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to download {file_path}: {response.status_code}")
+        return response.content
+    
     def download_sharepoint_data(self):
-        """Download all required Excel files from SharePoint"""
+        """Download all required Excel files from SharePoint in parallel"""
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             'Content-Type': 'application/json'
@@ -118,33 +127,32 @@ class InventoryCalculator:
         else:
             raise Exception(f"Failed to get folder contents: {response.status_code} {response.text}")
         
-        # Download Sales Order Checklist
-        download_url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id_documents}/items/{sales_order_checklist_id}/content"
-        response = requests.get(download_url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download sales order checklist: {response.status_code}")
-        df_sales_order_check_list = pd.read_excel(BytesIO(response.content))
+        # Create download tasks for all 4 files
+        download_tasks = [
+            ('sales_checklist', sales_order_checklist_id),
+            ('inventory', f"{raw_data_folder_id}:/Inventory.xlsx:"),
+            ('order', f"{raw_data_folder_id}:/Order.xlsx:"),
+            ('ls_tracking', f"{self.folder_id}:/LS order tracking.xlsx:")
+        ]
         
-        # Download Inventory
-        download_url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id_documents}/items/{raw_data_folder_id}:/Inventory.xlsx:/content"
-        response = requests.get(download_url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download inventory: {response.status_code}")
-        df_inventory = pd.read_excel(BytesIO(response.content))
+        # Download all files in parallel
+        downloaded_data = {}
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(self._download_file, task[1], headers): task[0] 
+                       for task in download_tasks}
+            
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    downloaded_data[name] = future.result()
+                except Exception as e:
+                    raise Exception(f"Failed to download {name}: {str(e)}")
         
-        # Download Order
-        download_url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id_documents}/items/{raw_data_folder_id}:/Order.xlsx:/content"
-        response = requests.get(download_url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download order: {response.status_code}")
-        df_order = pd.read_excel(BytesIO(response.content))
-        
-        # Download LS Order Tracking
-        download_url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{self.drive_id_documents}/items/{self.folder_id}:/LS order tracking.xlsx:/content"
-        response = requests.get(download_url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download LS order tracking: {response.status_code}")
-        df_order_tracking = pd.read_excel(BytesIO(response.content), sheet_name='Shipped')
+        # Parse all Excel files from downloaded data
+        df_sales_order_check_list = pd.read_excel(BytesIO(downloaded_data['sales_checklist']))
+        df_inventory = pd.read_excel(BytesIO(downloaded_data['inventory']))
+        df_order = pd.read_excel(BytesIO(downloaded_data['order']))
+        df_order_tracking = pd.read_excel(BytesIO(downloaded_data['ls_tracking']), sheet_name='Shipped')
         
         return {
             'sales_order_check_list': df_sales_order_check_list,
