@@ -25,16 +25,19 @@ venv/
 ENV/
 env/
 .venv
+backend/venv/
 
 # Environment variables
 .env
 .env.local
 .env.*.local
+backend/.env
 
 # Flask
 instance/
 .webassets-cache
 flask.log
+backend/flask.log
 
 # IDE
 .vscode/
@@ -60,3 +63,10 @@ htmlcov/
 tmp/
 temp/
 *.tmp
+
+# Netlify
+.netlify/
+env.js.backup
+
+# Railway
+.railway/
